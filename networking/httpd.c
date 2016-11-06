@@ -125,6 +125,7 @@
 //usage:     "\n	-d STRING	URL decode STRING"
 
 #include "libbb.h"
+#include "common_bufsiz.h"
 #if ENABLE_PAM
 /* PAM may include <locale.h>. We may need to undefine bbox's stub define: */
 # undef setlocale
@@ -307,7 +308,8 @@ struct globals {
 	Htaccess *script_i;     /* config script interpreters */
 #endif
 	char *iobuf;            /* [IOBUF_SIZE] */
-#define hdr_buf bb_common_bufsiz1
+#define        hdr_buf bb_common_bufsiz1
+#define sizeof_hdr_buf COMMON_BUFSIZE
 	char *hdr_ptr;
 	int hdr_cnt;
 #if ENABLE_FEATURE_HTTPD_ERROR_PAGES
@@ -368,6 +370,7 @@ enum {
 # define content_gzip     0
 #endif
 #define INIT_G() do { \
+	setup_common_bufsiz(); \
 	SET_PTR_TO_GLOBALS(xzalloc(sizeof(G))); \
 	IF_FEATURE_HTTPD_BASIC_AUTH(g_realm = "Web Server Authentication";) \
 	IF_FEATURE_HTTPD_RANGES(range_start = -1;) \
@@ -967,19 +970,30 @@ static void send_headers(int responseNum)
 	}
 #endif
 	if (responseNum == HTTP_MOVED_TEMPORARILY) {
-		len += sprintf(iobuf + len, "Location: %s/%s%s\r\n",
+		/* Responding to "GET /dir" with
+		 * "HTTP/1.0 302 Found" "Location: /dir/"
+		 * - IOW, asking them to repeat with a slash.
+		 * Here, overflow IS possible, can't use sprintf:
+		 * mkdir test
+		 * python -c 'print("get /test?" + ("x" * 8192))' | busybox httpd -i -h .
+		 */
+		len += snprintf(iobuf + len, IOBUF_SIZE-3 - len,
+				"Location: %s/%s%s\r\n",
 				found_moved_temporarily,
 				(g_query ? "?" : ""),
 				(g_query ? g_query : ""));
+		if (len > IOBUF_SIZE-3)
+			len = IOBUF_SIZE-3;
 	}
 
 #if ENABLE_FEATURE_HTTPD_ERROR_PAGES
 	if (error_page && access(error_page, R_OK) == 0) {
-		strcat(iobuf, "\r\n");
-		len += 2;
-
-		if (DEBUG)
+		iobuf[len++] = '\r';
+		iobuf[len++] = '\n';
+		if (DEBUG) {
+			iobuf[len] = '\0';
 			fprintf(stderr, "headers: '%s'\n", iobuf);
+		}
 		full_write(STDOUT_FILENO, iobuf, len);
 		if (DEBUG)
 			fprintf(stderr, "writing error page: '%s'\n", error_page);
@@ -1021,8 +1035,10 @@ static void send_headers(int responseNum)
 				responseNum, responseString,
 				responseNum, responseString, infoString);
 	}
-	if (DEBUG)
+	if (DEBUG) {
+		iobuf[len] = '\0';
 		fprintf(stderr, "headers: '%s'\n", iobuf);
+	}
 	if (full_write(STDOUT_FILENO, iobuf, len) != len) {
 		if (verbose > 1)
 			bb_perror_msg("error");
@@ -1053,7 +1069,7 @@ static int get_line(void)
 	alarm(HEADER_READ_TIMEOUT);
 	while (1) {
 		if (hdr_cnt <= 0) {
-			hdr_cnt = safe_read(STDIN_FILENO, hdr_buf, sizeof(hdr_buf));
+			hdr_cnt = safe_read(STDIN_FILENO, hdr_buf, sizeof_hdr_buf);
 			if (hdr_cnt <= 0)
 				break;
 			hdr_ptr = hdr_buf;
@@ -1178,9 +1194,9 @@ static NOINLINE void cgi_io_loop_and_exit(int fromCgi_rd, int toCgi_wr, int post
 			/* We expect data, prev data portion is eaten by CGI
 			 * and there *is* data to read from the peer
 			 * (POSTDATA) */
-			//count = post_len > (int)sizeof(hdr_buf) ? (int)sizeof(hdr_buf) : post_len;
+			//count = post_len > (int)sizeof_hdr_buf ? (int)sizeof_hdr_buf : post_len;
 			//count = safe_read(STDIN_FILENO, hdr_buf, count);
-			count = safe_read(STDIN_FILENO, hdr_buf, sizeof(hdr_buf));
+			count = safe_read(STDIN_FILENO, hdr_buf, sizeof_hdr_buf);
 			if (count > 0) {
 				hdr_cnt = count;
 				hdr_ptr = hdr_buf;
